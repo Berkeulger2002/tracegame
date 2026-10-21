@@ -1,0 +1,18 @@
+name: trace-local
+
+services:
+  mongodb:
+    image: mongo:7.0
+    ports:
+      - "127.0.0.1:27018:27017"
+    volumes:
+      - trace_mongo7_data:/data/db
+
+  redis:
+    image: redis:7.4
+    ports:
+      - "127.0.0.1:6380:6379"
+
+volumes:
+  trace_mongo_data:
+  trace_mongo7_data:
