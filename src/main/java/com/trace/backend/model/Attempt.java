@@ -7,6 +7,10 @@ import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
 
 @Document(collection = "attempt")
 public record Attempt(
@@ -37,10 +41,13 @@ public record Attempt(
 
         // Eski kayıtlarda score bulunmayabilir.
         // Yeni Attempt oluşturulurken de puanı sunucu hesaplar.
-        if (score == null) {
+        if (status == Status.LOST) {
+            score = 0;
+        } else if (score == null) {
             score = calculateScore(
                     status,
                     answers,
+                    hints,
                     mistakeCount,
                     activeDurationMillis,
                     activeTimeTracked
@@ -93,41 +100,64 @@ public record Attempt(
     private static int calculateScore(
             Status status,
             List<Answer> answers,
+            List<Hint> hints,
             int mistakeCount,
             Long activeDurationMillis,
             boolean activeTimeTracked
     ) {
-        long correctStepCount = answers.stream()
-                .filter(Answer::correct)
-                .map(Answer::stepPosition)
-                .distinct()
-                .count();
+        Map<Integer, Integer> mistakesByStep = new HashMap<>();
+        Set<Integer> completedSteps = new HashSet<>();
+        long stepPoints = 0;
 
-        long correctPoints = correctStepCount * 100L;
-        long mistakePenalty = Math.max(0, mistakeCount) * 25L;
+        // Cevaplar servis tarafından gönderilme sırasıyla eklenir.
+        // Yalnızca doğru tamamlanan adım puan kazandırır.
+        for (Answer answer : answers) {
+            int position = answer.stepPosition();
+            if (completedSteps.contains(position)) {
+                continue;
+            }
+            if (!answer.correct()) {
+                mistakesByStep.merge(position, 1, Integer::sum);
+                continue;
+            }
 
-        long completionBonus = 0;
+            int mistakes = mistakesByStep.getOrDefault(position, 0);
+            stepPoints += switch (mistakes) {
+                case 0 -> 20;
+                case 1 -> 14;
+                case 2 -> 8;
+                default -> 0;
+            };
+            completedSteps.add(position);
+        }
+
+        long perfectBonus = 0;
+        long noHintBonus = 0;
         long speedBonus = 0;
 
+        // Elenen veya devam eden oyuncu yalnızca adım puanlarını korur.
         if (status == Status.WON) {
-            completionBonus = 200;
+            boolean noWrongAnswers = answers.stream().allMatch(Answer::correct);
+            if (mistakeCount == 0 && noWrongAnswers) {
+                perfectBonus = 50;
+            }
+            if (hints.isEmpty()) {
+                noHintBonus = 20;
+            }
 
+            // Güvenilir aktif süre yoksa zaman bonusu verilmez.
             if (activeTimeTracked
                     && activeDurationMillis != null
                     && activeDurationMillis >= 0) {
-                long activeSeconds = activeDurationMillis / 1000L;
-                speedBonus = Math.max(0L, 100L - activeSeconds);
+                long elapsedAfterGrace = Math.max(0L, activeDurationMillis - 15_000L);
+                // İlk kesinti 19. saniyede; sonra her 4 saniyede bir.
+                speedBonus = Math.max(0L, 30L - elapsedAfterGrace / 4_000L);
             }
         }
 
-        long total = correctPoints
-                - mistakePenalty
-                + completionBonus
-                + speedBonus;
-
         return (int) Math.min(
                 Integer.MAX_VALUE,
-                Math.max(0L, total)
+                stepPoints + perfectBonus + noHintBonus + speedBonus
         );
     }
 
